@@ -29,6 +29,9 @@ const state = {
   users: [],
   savedRoutes: [],
   notifications: [],
+  authMode: 'login',
+  authNotice: '',
+  appError: '',
   modal: null,
   loading: false,
   filters: { from: '', to: '', ride_rule: 'safe', date: today() },
@@ -60,6 +63,12 @@ function routeSummary(r){ return [r.route_name, r.trip_type, r.recurrence_type &
 
 const $ = (sel) => document.querySelector(sel);
 const app = $('#app');
+window.addEventListener('error', (event) => showAppError(event.message || 'Unexpected app error'));
+window.addEventListener('unhandledrejection', (event) => showAppError(event.reason?.message || 'Unexpected app error'));
+function showAppError(message){
+  if (!app) return;
+  app.innerHTML = `<div class="auth"><div class="card"><div class="h1">App could not load</div><p class="muted">${esc(message)}</p><div class="alert">Try clearing browser cache, then redeploy from Netlify without cache. If this remains, check Supabase URL/key and SQL migrations.</div></div></div>`;
+}
 const money = (n) => `Rs. ${Number(n || 0).toLocaleString('en-PK')}`;
 const fmt = (dt) => new Date(dt).toLocaleString('en-PK', { dateStyle: 'medium', timeStyle: 'short' });
 function today(){ return new Date().toISOString().slice(0,10); }
@@ -77,13 +86,18 @@ supabase.auth.onAuthStateChange((_event, session) => {
 init();
 
 async function init(){
-  const { data } = await supabase.auth.getSession();
-  state.session = data.session;
-  if (!state.session) return renderAuth();
-  await loadMe();
-  await loadData();
-  render();
-  subscribeRealtime();
+  try {
+    const { data } = await supabase.auth.getSession();
+    state.session = data.session;
+    if (!state.session) return renderAuth();
+    const ok = await loadMe();
+    if (!ok) return;
+    await loadData();
+    render();
+    subscribeRealtime();
+  } catch (err) {
+    showAppError(err.message || 'App initialization failed');
+  }
 }
 
 async function loadMe(){
@@ -92,12 +106,18 @@ async function loadMe(){
     supabase.from('profiles').select('*').eq('id', uid).maybeSingle(),
     supabase.from('private_profiles').select('*').eq('user_id', uid).maybeSingle(),
   ]);
+  if (p.error) throw new Error(`Profile load failed: ${p.error.message}`);
+  if (pp.error) throw new Error(`Private profile load failed: ${pp.error.message}`);
   state.profile = p.data;
   state.privateProfile = pp.data;
   if (!state.profile) {
-    toast('Profile not found. Please complete signup again.');
     await supabase.auth.signOut();
+    state.authMode = 'signup';
+    state.authNotice = 'Profile was not created. Please sign up again, or check that schema.sql trigger was run in Supabase.';
+    renderAuth();
+    return false;
   }
+  return true;
 }
 
 async function loadData(){
@@ -117,6 +137,8 @@ async function loadData(){
     promises.push(supabase.from('profiles').select('*').order('created_at',{ascending:false}).limit(100));
   }
   const res = await Promise.all(promises);
+  const firstError = res.find(x => x.error)?.error;
+  if (firstError) throw new Error(`Database query failed: ${firstError.message}`);
   state.rides = res[0].data || [];
   state.myBookings = (res[1].data || []).filter(b => b.passenger_id === uid);
   state.requests = (res[1].data || []).filter(b => b.driver_id === uid);
@@ -138,15 +160,20 @@ function subscribeRealtime(){
 }
 
 function renderAuth(){
-  app.innerHTML = `<div class="auth"><div class="hero"><img class="heroLogo" src="/branding/logo-horizontal.png" alt="RideMate logo" /><div class="pill ok">Pakistan Carpool</div><div class="h1">Ride sharing with safety, seats & rules.</div><p>Drivers post rides. Passengers book seats. Admin controls reports and users.</p></div><div class="card"><div class="h2">Login</div><form id="loginForm" class="grid"><label>Email<input name="email" type="email" required placeholder="you@email.com"></label><label>Password<input name="password" type="password" required placeholder="minimum 6 characters"></label><button class="btn green">Login</button></form><div class="divider"></div><div class="h2">Create account</div><form id="signupForm" class="grid"><label>Full name<input name="full_name" required placeholder="Mustafa Ali"></label><label>Email<input name="email" type="email" required></label><label>Password<input name="password" type="password" minlength="6" required></label><div class="grid2"><label>Role<select name="role"><option value="passenger">Passenger</option><option value="driver">Driver</option></select></label><label>Gender<select name="gender"><option value="male">Male</option><option value="female">Female</option></select></label></div><label>Phone<input name="phone" required placeholder="03000000000"></label><button class="btn">Create account</button></form><p class="small muted">Admin role is assigned from Supabase SQL only, not public signup.</p></div></div>`;
-  $('#loginForm').onsubmit = async (e) => { e.preventDefault(); const f=Object.fromEntries(new FormData(e.target)); const {error}=await supabase.auth.signInWithPassword(f); if(error) toast(error.message); };
-  $('#signupForm').onsubmit = async (e) => { e.preventDefault(); const f=Object.fromEntries(new FormData(e.target)); const {error}=await supabase.auth.signUp({ email:f.email, password:f.password, options:{ data:{ full_name:f.full_name, role:f.role, gender:f.gender, phone:f.phone }}}); if(error) toast(error.message); else toast('Account created. Check email if confirmation is enabled, then login.'); };
+  const isSignup = state.authMode === 'signup';
+  app.innerHTML = `<div class="auth"><div class="hero"><img class="heroLogo" src="/branding/logo-horizontal.png" alt="RideMate logo" /><div class="pill ok">Pakistan Carpool</div><div class="h1">Ride sharing with safety, seats & rules.</div><p>Drivers post rides. Passengers book seats. Admin controls reports and users.</p></div><div class="card authCard"><div class="authTabs"><button class="authTab ${!isSignup?'active':''}" id="showLogin" type="button">Login</button><button class="authTab ${isSignup?'active':''}" id="showSignup" type="button">Sign up</button></div>${state.authNotice ? `<div class="success">${esc(state.authNotice)}</div>` : ''}${!isSignup ? `<div class="h2">Welcome back</div><p class="small muted">Login with your registered email and password.</p><form id="loginForm" class="grid"><label>Email<input name="email" type="email" required placeholder="you@email.com"></label><label>Password<input name="password" type="password" required placeholder="minimum 6 characters"></label><button class="btn green">Login</button></form><p class="small muted">New user? Tap Sign up above.</p>` : `<div class="h2">Create account</div><p class="small muted">Register as passenger or driver. Admin role is assigned from Supabase only.</p><form id="signupForm" class="grid"><label>Full name<input name="full_name" required placeholder="Mustafa Ali"></label><label>Email<input name="email" type="email" required placeholder="you@email.com"></label><label>Password<input name="password" type="password" minlength="6" required placeholder="minimum 6 characters"></label><div class="grid2"><label>Role<select name="role"><option value="passenger">Passenger</option><option value="driver">Driver</option></select></label><label>Gender<select name="gender"><option value="male">Male</option><option value="female">Female</option></select></label></div><label>Phone<input name="phone" required placeholder="03000000000"></label><button class="btn">Create account</button></form>`}</div></div>`;
+  $('#showLogin').onclick = () => { state.authMode='login'; state.authNotice=''; renderAuth(); };
+  $('#showSignup').onclick = () => { state.authMode='signup'; state.authNotice=''; renderAuth(); };
+  const loginForm = $('#loginForm');
+  if (loginForm) loginForm.onsubmit = async (e) => { e.preventDefault(); const f=Object.fromEntries(new FormData(e.target)); const {error}=await supabase.auth.signInWithPassword(f); if(error) toast(error.message); };
+  const signupForm = $('#signupForm');
+  if (signupForm) signupForm.onsubmit = async (e) => { e.preventDefault(); const f=Object.fromEntries(new FormData(e.target)); const {error}=await supabase.auth.signUp({ email:f.email, password:f.password, options:{ data:{ full_name:f.full_name, role:f.role, gender:f.gender, phone:f.phone }}}); if(error) toast(error.message); else { state.authMode='login'; state.authNotice='Registered successfully. Please check your email confirmation link, then login.'; renderAuth(); } };
 }
 
 function render(){
   if (!state.session) return renderAuth();
   const tabs = navTabs();
-  app.innerHTML = `<div class="shell"><div class="top"><div class="brand"><div class="row"><img class="topLogo" src="/branding/favicon-64.png" alt="RideMate" /><div><div class="title">${cfg.appName}</div><div class="sub">${esc(state.profile?.full_name)} · ${esc(role())}</div></div></div><button class="avatar" id="logoutBtn">Logout</button></div></div><main class="content">${view()}</main>${state.modal || ''}<nav class="tabs">${tabs.map(t=>`<button class="tab ${state.tab===t.id?'active':''}" data-tab="${t.id}">${t.icon}<br>${t.label}</button>`).join('')}</nav></div>`;
+  app.innerHTML = `<div class="shell"><div class="top"><div class="brand"><div class="row"><img class="topLogo" src="/icons/icon-192.png" alt="RideMate" /><div><div class="title">${cfg.appName}</div><div class="sub">${esc(state.profile?.full_name)} · ${esc(role())}</div></div></div><button class="avatar" id="logoutBtn">Logout</button></div></div><main class="content">${view()}</main>${state.modal || ''}<nav class="tabs">${tabs.map(t=>`<button class="tab ${state.tab===t.id?'active':''}" data-tab="${t.id}">${t.icon}<br>${t.label}</button>`).join('')}</nav></div>`;
   $('#logoutBtn').onclick=()=>supabase.auth.signOut();
   document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
   bindViewEvents();
@@ -187,12 +214,12 @@ function passengerHome(){
   if (state.filters.ride_rule === 'safe') rides = rides.filter(r => compatible(r).ok);
   else if (state.filters.ride_rule !== 'all') rides = rides.filter(r => r.ride_rule === state.filters.ride_rule);
   const cards = rides.map(rideCard).join('') || `<div class="empty">No matching rides yet. Save your route and app will show matches when drivers post.</div>`;
-  return `<div class="card"><div class="h1">Find a safe seat</div><div class="grid"><label>Popular route<select id="presetSelect"><option value="">Choose route shortcut</option>${routePresetOptions()}</select></label><div class="grid2"><label>From<input id="fFrom" list="routeCities" value="${esc(state.filters.from)}" placeholder="Wah Cantt"></label><label>To<input id="fTo" list="routeCities" value="${esc(state.filters.to)}" placeholder="Islamabad"></label></div><label>Filter<select id="fRule"><option value="safe" ${state.filters.ride_rule==='safe'?'selected':''}>Only safe matching rides</option><option value="all" ${state.filters.ride_rule==='all'?'selected':''}>All rides</option><option value="female_only" ${state.filters.ride_rule==='female_only'?'selected':''}>Female-only seats</option><option value="male_only" ${state.filters.ride_rule==='male_only'?'selected':''}>Male-only seats</option><option value="family_only" ${state.filters.ride_rule==='family_only'?'selected':''}>Family only</option></select></label><button class="btn ghost" id="saveSearchRoute">Save this route & notify me</button></div>${routeDatalist()}</div><div class="card"><div class="h2">Popular local routes</div><div class="presetGrid">${routePresetCards()}</div></div>${cards}`;
+  return `<div class="card"><div class="h1">Find a safe seat</div><div class="grid"><label>Route shortcut<select id="presetSelect"><option value="">Choose route shortcut</option>${routePresetOptions()}</select></label><div class="grid2"><label>From<input id="fFrom" list="routeCities" value="${esc(state.filters.from)}" placeholder="Wah Cantt"></label><label>To<input id="fTo" list="routeCities" value="${esc(state.filters.to)}" placeholder="Islamabad"></label></div><label>Filter<select id="fRule"><option value="safe" ${state.filters.ride_rule==='safe'?'selected':''}>Only safe matching rides</option><option value="all" ${state.filters.ride_rule==='all'?'selected':''}>All rides</option><option value="female_only" ${state.filters.ride_rule==='female_only'?'selected':''}>Female-only seats</option><option value="male_only" ${state.filters.ride_rule==='male_only'?'selected':''}>Male-only seats</option><option value="family_only" ${state.filters.ride_rule==='family_only'?'selected':''}>Family only</option></select></label><div class="alert">Pickup point ab booking request me mention ho sakta hai, for example: New City, Barrier 3, Taxila stop.</div><button class="btn ghost" id="saveSearchRoute">Save this route & notify me</button></div>${routeDatalist()}</div>${cards}`;
 }
 
 function rideCard(r){
   const c = compatible(r); const existing = state.myBookings.find(b => b.ride_id === r.id && ['pending','accepted'].includes(b.status));
-  return `<div class="card ride"><div class="row"><div><div class="route">${esc(r.from_city)} → ${esc(r.to_city)}</div><div class="small muted">${esc(r.pickup_area||'Pickup')} to ${esc(r.dropoff_area||'Dropoff')}</div></div><div class="fare">${money(r.price_per_seat)}</div></div><div class="meta"><span class="pill ok">${r.seats_left} seats left</span><span class="pill">${esc(ruleLabel(r.ride_rule))}</span><span class="pill ${c.ok?'ok':'bad'}">${esc(existing ? existing.status : c.msg)}</span></div><div class="small muted">${fmt(r.departure_at)} · ${esc(routeSummary(r))}</div><div class="small muted">${esc(r.driver_name)} · ${esc(r.driver_gender)} driver · ${esc(r.car_model||'Car')} ${esc(r.plate_number||'')}</div><div class="grid2"><button class="btn ghost" data-details="${r.id}">Details</button><button class="btn green" data-book="${r.id}" ${(!c.ok || existing)?'disabled':''}>${existing?'Requested':'Book seat'}</button></div></div>`;
+  return `<div class="card ride"><div class="row"><div><div class="route">${esc(r.from_city)} → ${esc(r.to_city)}</div><div class="small muted">${esc(r.pickup_area||'Pickup')} to ${esc(r.dropoff_area||'Dropoff')}</div></div><div class="fare">${money(r.price_per_seat)}</div></div><div class="meta"><span class="pill ok">${r.seats_left} seats left</span><span class="pill">${esc(ruleLabel(r.ride_rule))}</span><span class="pill ${c.ok?'ok':'bad'}">${esc(existing ? existing.status : c.msg)}</span></div><div class="small muted">${fmt(r.departure_at)} · ${esc(routeSummary(r))}</div><div class="small muted">${esc(r.driver_name)} · ${esc(r.driver_gender)} driver · ${esc(r.car_model||'Car')} ${esc(r.plate_number||'')}</div><div class="grid2"><button class="btn ghost" data-details="${r.id}">Details</button><button class="btn green" data-book="${r.id}" ${(!c.ok || existing)?'disabled':''}>${existing?'Requested':'Request seat'}</button></div></div>`;
 }
 function ruleLabel(x){ return ({mixed:'Mixed seats',male_only:'Male passengers only',female_only:'Female passengers only',family_only:'Family only'}[x] || x); }
 
@@ -207,8 +234,8 @@ function createRideView(){
 }
 
 function routesView(){
-  const saved = state.savedRoutes.map(r=>`<div class="card"><div class="route">${esc(r.from_city)} → ${esc(r.to_city)}</div><div class="small muted">${esc(r.pickup_area||'Any pickup')} to ${esc(r.dropoff_area||'Any drop')} · ${esc(r.trip_type||'any')} · ${esc(r.preferred_time||'any time')}</div><button class="btn danger" data-delete-route="${r.id}">Delete</button></div>`).join('') || '<div class="empty">No saved routes yet.</div>';
-  return `<div class="card"><div class="h1">Routes & demand</div><p class="muted">Save daily routes, use public pickup/drop points, and match morning/evening commute rides.</p><div class="presetGrid">${ROUTE_PRESETS.map(r=>`<button class="routePreset" data-route-preset="${esc(r.code)}"><b>${esc(r.name)}</b><span>${esc(r.via)}</span><small>${esc(r.distance)} · ${esc(r.time)}</small></button>`).join('')}</div></div><div class="card"><div class="h2">Saved routes</div>${saved}</div><div class="card"><div class="h2">Notifications</div>${state.notifications.map(n=>`<div class="row"><div><b>${esc(n.title)}</b><div class="small muted">${esc(n.body)}</div></div><span class="small muted">${new Date(n.created_at).toLocaleDateString()}</span></div>`).join('') || '<p class="muted small">No notifications yet.</p>'}</div>`;
+  const saved = state.savedRoutes.map(r=>`<div class="card"><div class="route">${esc(r.from_city)} → ${esc(r.to_city)}</div><div class="small muted">${esc(r.pickup_area||'Any pickup')} to ${esc(r.dropoff_area||'Any drop')} · ${esc(r.trip_type||'daily')} · ${esc(r.preferred_time||'any time')}</div><button class="btn danger" data-delete-route="${r.id}">Delete</button></div>`).join('') || '<div class="empty">No saved routes yet. Go to Search, enter From/To, then tap Save route.</div>';
+  return `<div class="card"><div class="h1">Routes</div><p class="muted">Saved routes help you remember daily commute demand. Popular route cards are removed to keep this page clean.</p></div><div class="card"><div class="h2">Saved routes</div>${saved}</div><div class="card"><div class="h2">Notifications</div>${state.notifications.map(n=>`<div class="row"><div><b>${esc(n.title)}</b><div class="small muted">${esc(n.body)}</div></div><span class="small muted">${new Date(n.created_at).toLocaleDateString()}</span></div>`).join('') || '<p class="muted small">No notifications yet.</p>'}</div>`;
 }
 
 function bookingsView(){
@@ -218,10 +245,10 @@ function requestsView(){
   return state.requests.map(requestCard).join('') || `<div class="empty">No passenger requests yet.</div>`;
 }
 function bookingCard(b){
-  return `<div class="card"><div class="row"><div><div class="route">${esc(b.from_city)} → ${esc(b.to_city)}</div><div class="small muted">${fmt(b.departure_at)} · Driver: ${esc(b.driver_name)}</div></div><span class="pill ${b.status==='accepted'?'ok':b.status==='pending'?'warn':'bad'}">${b.status}</span></div><div class="divider"></div><div class="grid2"><button class="btn ghost" data-contact="${b.id}" ${b.status!=='accepted'?'disabled':''}>Contact</button><button class="btn danger" data-cancel-booking="${b.id}" ${!['pending','accepted'].includes(b.status)?'disabled':''}>Cancel</button></div></div>`;
+  return `<div class="card"><div class="row"><div><div class="route">${esc(b.from_city)} → ${esc(b.to_city)}</div><div class="small muted">${fmt(b.departure_at)} · Driver: ${esc(b.driver_name)}</div></div><span class="pill ${b.status==='accepted'?'ok':b.status==='pending'?'warn':'bad'}">${b.status}</span></div>${b.note?`<div class="alert" style="margin-top:12px"><b>Pickup request / note:</b><br>${esc(b.note)}</div>`:''}<div class="divider"></div><div class="grid2"><button class="btn ghost" data-contact="${b.id}" ${b.status!=='accepted'?'disabled':''}>Contact</button><button class="btn danger" data-cancel-booking="${b.id}" ${!['pending','accepted'].includes(b.status)?'disabled':''}>Cancel</button></div></div>`;
 }
 function requestCard(b){
-  return `<div class="card"><div class="row"><div><div class="route">${esc(b.passenger_name)}</div><div class="small muted">${esc(b.passenger_gender)} · ${esc(b.travel_mode)} · ${esc(b.from_city)} → ${esc(b.to_city)}</div></div><span class="pill ${b.status==='accepted'?'ok':b.status==='pending'?'warn':'bad'}">${b.status}</span></div><div class="small muted">${fmt(b.departure_at)}</div><div class="divider"></div><div class="grid2"><button class="btn green" data-accept="${b.id}" ${b.status!=='pending'?'disabled':''}>Accept</button><button class="btn danger" data-reject="${b.id}" ${b.status!=='pending'?'disabled':''}>Reject</button><button class="btn ghost" data-paid="${b.id}" ${b.status!=='accepted'?'disabled':''}>Mark paid</button></div></div>`;
+  return `<div class="card"><div class="row"><div><div class="route">${esc(b.passenger_name)}</div><div class="small muted">${esc(b.passenger_gender)} · ${esc(b.travel_mode)} · ${esc(b.from_city)} → ${esc(b.to_city)}</div></div><span class="pill ${b.status==='accepted'?'ok':b.status==='pending'?'warn':'bad'}">${b.status}</span></div><div class="small muted">${fmt(b.departure_at)}</div>${b.note?`<div class="alert" style="margin-top:12px"><b>Passenger pickup request:</b><br>${esc(b.note)}</div>`:''}<div class="divider"></div><div class="grid2"><button class="btn green" data-accept="${b.id}" ${b.status!=='pending'?'disabled':''}>Accept</button><button class="btn danger" data-reject="${b.id}" ${b.status!=='pending'?'disabled':''}>Reject</button><button class="btn ghost" data-paid="${b.id}" ${b.status!=='accepted'?'disabled':''}>Mark paid</button></div></div>`;
 }
 
 function safetyView(){
@@ -257,7 +284,7 @@ function bindViewEvents(){
   const saveSearchRoute=$('#saveSearchRoute'); if(saveSearchRoute) saveSearchRoute.onclick=saveCurrentRoute;
   document.querySelectorAll('[data-route-preset]').forEach(b=>b.onclick=()=>applyPresetToSearch(b.dataset.routePreset));
   document.querySelectorAll('[data-delete-route]').forEach(b=>b.onclick=()=>deleteSavedRoute(b.dataset.deleteRoute));
-  document.querySelectorAll('[data-book]').forEach(b=>b.onclick=()=>bookRide(b.dataset.book));
+  document.querySelectorAll('[data-book]').forEach(b=>b.onclick=()=>openBookingModal(b.dataset.book));
   document.querySelectorAll('[data-details]').forEach(b=>b.onclick=()=>showRideDetails(b.dataset.details));
   document.querySelectorAll('[data-accept]').forEach(b=>b.onclick=()=>bookingAction('accept_booking_request',{p_booking_id:b.dataset.accept}));
   document.querySelectorAll('[data-reject]').forEach(b=>b.onclick=()=>bookingAction('reject_booking_request',{p_booking_id:b.dataset.reject,p_reason:'Rejected by driver'}));
@@ -272,6 +299,7 @@ function bindViewEvents(){
   const profileForm=$('#profileForm'); if(profileForm) profileForm.onsubmit=saveProfile;
   const vehicleForm=$('#vehicleForm'); if(vehicleForm) vehicleForm.onsubmit=addVehicle;
   const reportForm=$('#reportForm'); if(reportForm) reportForm.onsubmit=submitReport;
+  const bookRideForm=$('#bookRideForm'); if(bookRideForm) bookRideForm.onsubmit=submitBookingRequest;
   const close=$('#modalClose'); if(close) close.onclick=()=>{state.modal=null; render();};
 }
 
@@ -297,18 +325,37 @@ async function deleteSavedRoute(id){ const {error}=await supabase.from('saved_ro
 async function createRide(e){
   e.preventDefault(); const f=Object.fromEntries(new FormData(e.target));
   if (new Date(f.departure_at) <= new Date()) return toast('Departure time must be in future');
+  if (f.recurrence_type === 'custom' && !(f.recurrence_days || '').trim()) return toast('Please enter custom days');
+  if (f.allow_monthly_booking === 'true' && !(+f.monthly_price > 0)) return toast('Please enter monthly seat price');
   const { error } = await supabase.rpc('create_ride', { p_vehicle_id:f.vehicle_id, p_from_city:f.from_city, p_to_city:f.to_city, p_pickup_area:f.pickup_area, p_dropoff_area:f.dropoff_area, p_departure_at:new Date(f.departure_at).toISOString(), p_total_seats:+f.total_seats, p_price_per_seat:+f.price_per_seat, p_ride_rule:f.ride_rule, p_notes:f.notes || null, p_route_code:f.route_code || null, p_route_name:f.route_name || null, p_trip_type:f.trip_type || 'one_way', p_recurrence_type:f.recurrence_type || 'once', p_recurrence_days:f.recurrence_days || null, p_return_time:f.return_time || null, p_allow_monthly_booking:f.allow_monthly_booking === 'true', p_monthly_price:f.monthly_price ? +f.monthly_price : null });
   if(error) toast(error.message); else { toast('Ride posted'); state.tab='home'; await loadData(); render(); }
 }
-async function bookRide(ride_id){
-  const { error } = await supabase.rpc('create_booking_request', { p_ride_id: ride_id, p_seats_requested: 1, p_note: null });
-  if(error) toast(error.message); else { toast('Booking request sent'); await loadData(); render(); }
+function openBookingModal(ride_id){
+  const r = state.rides.concat(state.myRides).find(x=>x.id===ride_id);
+  if(!r) return;
+  const c = compatible(r);
+  const existing = state.myBookings.find(b => b.ride_id === r.id && ['pending','accepted'].includes(b.status));
+  if (existing) return toast(`You already have a ${existing.status} request for this ride`);
+  if (!c.ok) return toast(c.msg);
+  state.modal = `<div class="modalBack"><div class="modal"><button class="btn ghost" id="modalClose">Close</button><div class="h1">Request seat</div><p class="muted">${esc(r.from_city)} → ${esc(r.to_city)} · ${fmt(r.departure_at)}</p><div class="card" style="box-shadow:none"><div class="row"><span>Driver pickup</span><b>${esc(r.pickup_area||'Not specified')}</b></div><div class="row"><span>Driver dropoff</span><b>${esc(r.dropoff_area||'Not specified')}</b></div><div class="row"><span>Fare / seat</span><b>${money(r.price_per_seat)}</b></div></div><form id="bookRideForm" class="grid"><input type="hidden" name="ride_id" value="${r.id}"><label>Your pickup point (optional)<input name="requested_pickup" placeholder="e.g. New City / Barrier 3 / Taxila stop"></label><label>Extra note for driver (optional)<textarea name="note" placeholder="Office gate, stop name, timing note, etc."></textarea></label><button class="btn green" ${!c.ok?'disabled':''}>${esc(c.msg==='Safe match'?'Send request':c.msg)}</button></form><p class="small muted">Example: if driver route is Barrier 3 → Blue Area, passenger can request pickup from New City here.</p></div></div>`;
+  render();
+}
+async function submitBookingRequest(e){
+  e.preventDefault();
+  const f = Object.fromEntries(new FormData(e.target));
+  const parts = [];
+  if ((f.requested_pickup || '').trim()) parts.push(`Requested pickup: ${(f.requested_pickup || '').trim()}`);
+  if ((f.note || '').trim()) parts.push((f.note || '').trim());
+  const bookingNote = parts.join(' | ') || null;
+  const { error } = await supabase.rpc('create_booking_request', { p_ride_id: f.ride_id, p_seats_requested: 1, p_note: bookingNote });
+  if(error) toast(error.message); else { state.modal=null; toast('Booking request sent'); await loadData(); render(); }
 }
 async function bookingAction(fn,args){ const {error}=await supabase.rpc(fn,args); if(error) toast(error.message); else {toast('Updated'); await loadData(); render();} }
 async function closeRide(id){ const {error}=await supabase.rpc('close_ride',{p_ride_id:id}); if(error) toast(error.message); else {toast('Ride closed'); await loadData(); render();} }
 async function getContact(id){ const {data,error}=await supabase.rpc('get_booking_contact',{p_booking_id:id}); if(error) toast(error.message); else alert(`Contact: ${data?.full_name}\nPhone: ${data?.phone}\nEmergency: ${data?.emergency_contact||'Not added'}`); }
 async function saveProfile(e){
   e.preventDefault(); const f=Object.fromEntries(new FormData(e.target));
+  if (!(f.phone || '').trim()) return toast('Phone number is required');
   const [a,b]=await Promise.all([
     supabase.from('profiles').update({full_name:f.full_name, gender:f.gender, travel_mode:f.travel_mode}).eq('id',state.session.user.id),
     supabase.from('private_profiles').update({phone:f.phone, emergency_contact:f.emergency_contact || null}).eq('user_id',state.session.user.id)
@@ -320,6 +367,6 @@ async function submitReport(e){ e.preventDefault(); const f=Object.fromEntries(n
 async function resolveReport(id){ const {error}=await supabase.from('reports').update({status:'resolved'}).eq('id',id); if(error) toast(error.message); else {toast('Report resolved'); await loadData(); render();} }
 async function adminUserStatus(id,status){ const {error}=await supabase.rpc('admin_set_user_status',{p_user_id:id,p_status:status}); if(error) toast(error.message); else {toast('User updated'); await loadData(); render();} }
 async function adminVehicleVerify(id,isVerified){ const {error}=await supabase.rpc('admin_set_vehicle_verified',{p_vehicle_id:id,p_verified:isVerified}); if(error) toast(error.message); else {toast('Vehicle updated'); await loadData(); render();} }
-function showRideDetails(id){ const r=state.rides.concat(state.myRides).find(x=>x.id===id); if(!r) return; const c=compatible(r); state.modal=`<div class="modalBack"><div class="modal"><button class="btn ghost" id="modalClose">Close</button><div class="h1">${esc(r.from_city)} → ${esc(r.to_city)}</div><p class="muted">${fmt(r.departure_at)}</p><div class="card" style="box-shadow:none"><div class="row"><span>Fare</span><b>${money(r.price_per_seat)}</b></div><div class="row"><span>Seats left</span><b>${r.seats_left}/${r.total_seats}</b></div><div class="row"><span>Rule</span><b>${esc(ruleLabel(r.ride_rule))}</b></div><div class="row"><span>Commute</span><b>${esc(routeSummary(r)||'One time')}</b></div><div class="row"><span>Monthly</span><b>${r.allow_monthly_booking ? money(r.monthly_price || 0) : 'No'}</b></div><div class="row"><span>Driver</span><b>${esc(r.driver_name)} · ${esc(r.driver_gender)}</b></div><div class="row"><span>Car</span><b>${esc(r.car_model)} · ${esc(r.plate_number)}</b></div></div><div class="alert">Driver gender is shown clearly. Phone number appears only after booking is accepted.</div>${role()==='passenger'?`<button class="btn green" data-book="${r.id}" ${!c.ok?'disabled':''}>${esc(c.msg==='Safe match'?'Book seat':c.msg)}</button>`:''}</div></div>`; render(); }
+function showRideDetails(id){ const r=state.rides.concat(state.myRides).find(x=>x.id===id); if(!r) return; const c=compatible(r); const existing = state.myBookings.find(b => b.ride_id === r.id && ['pending','accepted'].includes(b.status)); state.modal=`<div class="modalBack"><div class="modal"><button class="btn ghost" id="modalClose">Close</button><div class="h1">${esc(r.from_city)} → ${esc(r.to_city)}</div><p class="muted">${fmt(r.departure_at)}</p><div class="card" style="box-shadow:none"><div class="row"><span>Fare</span><b>${money(r.price_per_seat)}</b></div><div class="row"><span>Seats left</span><b>${r.seats_left}/${r.total_seats}</b></div><div class="row"><span>Rule</span><b>${esc(ruleLabel(r.ride_rule))}</b></div><div class="row"><span>Commute</span><b>${esc(routeSummary(r)||'One time')}</b></div><div class="row"><span>Monthly</span><b>${r.allow_monthly_booking ? money(r.monthly_price || 0) : 'No'}</b></div><div class="row"><span>Driver</span><b>${esc(r.driver_name)} · ${esc(r.driver_gender)}</b></div><div class="row"><span>Car</span><b>${esc(r.car_model)} · ${esc(r.plate_number)}</b></div></div><div class="alert">Driver gender is shown clearly. Phone number appears only after booking is accepted.</div>${role()==='passenger'?`<button class="btn green" data-book="${r.id}" ${(!c.ok || existing)?'disabled':''}>${esc(existing ? `Already ${existing.status}` : (c.msg==='Safe match'?'Request seat':c.msg))}</button>`:''}</div></div>`; render(); }
 
 if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(()=>{}));
