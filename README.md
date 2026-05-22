@@ -1,4 +1,4 @@
-# RideMate Final Public App
+# RideMate Market Ready Public App
 
 This is a production-oriented public carpool web app package for Netlify + Supabase.
 It includes passenger app, driver app, admin portal, Supabase database schema, RLS policies, booking transaction functions, realtime updates, and PWA install support.
@@ -122,3 +122,20 @@ Paid third-party modules are intentionally left as variables/integration points:
 - Payments need Easypaisa/JazzCash/Stripe/manual bank integration.
 
 Do not skip legal/safety policies for ride-sharing in your target area.
+
+
+## Upgrade 02 added
+
+This version includes market-focused commute modules: recurring rides, AM/PM trips, monthly seat fields, saved routes, local Wah Cantt/Islamabad/Rawalpindi route presets, pickup point catalog, and improved admin KPIs.
+
+For an existing deployed Supabase project, run `supabase/upgrade_02_commute_modules.sql` once before redeploying the updated frontend.
+
+
+## Branding assets added
+
+- `public/branding/logo-horizontal.png` – main RideMate logo
+- `public/branding/favicon-32.png` – browser favicon
+- `public/branding/apple-touch-icon.png` – mobile bookmark icon
+- `public/icons/icon-192.png` and `public/icons/icon-512.png` – updated PWA icons
+
+These are already wired into the app header, auth screen, favicon, and PWA manifest.
