@@ -1,5 +1,5 @@
-const CACHE = 'ridemate-v4';
-const ASSETS = ['/', '/manifest.webmanifest'];
+const CACHE = 'ridemate-v2-final-1';
+const ASSETS = ['/', '/manifest.webmanifest', '/icons/icon.svg'];
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(ASSETS)).then(() => self.skipWaiting()));
 });
