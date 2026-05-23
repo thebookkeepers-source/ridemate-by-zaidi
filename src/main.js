@@ -44,6 +44,12 @@ const esc = (v='') => String(v ?? '').replace(/[&<>"']/g, s => ({'&':'&amp;','<'
 const money = (n) => `Rs. ${Number(n || 0).toLocaleString('en-PK')}`;
 const fmt = (d) => d ? new Date(d).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '';
 
+const withTimeout = (promise, ms=5000, label='Request timeout') => Promise.race([
+  promise,
+  new Promise((_, reject) => setTimeout(() => reject(new Error(label)), ms))
+]);
+
+
 function showBoot(message='Loading RideMate...'){
   app.innerHTML = `<div class="auth"><div class="authShell"><div class="authHero"><div class="bigIcon">${logo()}</div><div class="h1">RideMate</div><p>${esc(message)}</p></div><div class="card"><div class="h2">Starting app</div><p class="small muted">Please wait. If this screen stays for more than 10 seconds, refresh once.</p><button class="btn green" onclick="location.reload()">Reload</button></div></div></div>`;
 }
@@ -61,30 +67,51 @@ window.addEventListener('error', (event) => {
 
 async function init(){
   showBoot();
+  let bootTimedOut = false;
+  const fallback = setTimeout(() => {
+    bootTimedOut = true;
+    console.warn('Boot timeout fallback shown');
+    if (!state.session) renderAuth();
+    else render();
+    toast('Slow connection. Showing available app screen.');
+  }, 6000);
   try {
-    const { data, error } = await supabase.auth.getSession();
+    const { data, error } = await withTimeout(supabase.auth.getSession(), 5000, 'Supabase session timeout');
     if (error) throw error;
     state.session = data.session;
     if (state.session) {
-      await loadMe();
-      await loadData();
+      await withTimeout(loadMe(), 5000, 'Profile loading timeout');
+      await withTimeout(loadData(), 7000, 'App data loading timeout');
       subscribeRealtime();
     }
-    render();
+    clearTimeout(fallback);
+    if (!bootTimedOut) render();
   } catch (err) {
+    clearTimeout(fallback);
     console.error('RideMate boot error:', err);
+    if (String(err.message || '').includes('timeout')) {
+      state.session = null;
+      renderAuth();
+      toast('Connection timeout. Please login again.');
+      return;
+    }
     app.innerHTML = `<div class="auth"><div class="authShell"><div class="card"><div class="h1">App setup issue</div><p class="muted">${esc(err.message || err)}</p><p class="small muted">Check Netlify environment variables and Supabase URL/key.</p><button class="btn green" onclick="location.reload()">Reload</button></div></div></div>`;
   }
 }
 supabase.auth.onAuthStateChange(async (_event, session) => {
   try {
     state.session = session;
-    if (session) { await loadMe(); await loadData(); subscribeRealtime(); }
-    else resetState();
+    if (session) {
+      showBoot('Signing you in...');
+      await withTimeout(loadMe(), 5000, 'Profile loading timeout');
+      await withTimeout(loadData(), 7000, 'App data loading timeout');
+      subscribeRealtime();
+    } else resetState();
     render();
   } catch (err) {
     console.error('Auth state error:', err);
     toast(err.message || 'Auth loading error');
+    if (!state.profile) renderAuth(); else render();
   }
 });
 function resetState(){
@@ -93,14 +120,12 @@ function resetState(){
 
 async function loadMe(){
   const uid = state.session.user.id;
-  const [p, pp] = await Promise.all([
-    supabase.from('profiles').select('*').eq('id',uid).maybeSingle(),
-    supabase.from('private_profiles').select('*').eq('user_id',uid).maybeSingle()
-  ]);
-  state.profile = p.data;
-  state.privateProfile = pp.data;
+  const p = await withTimeout(supabase.from('profiles').select('*').eq('id',uid).maybeSingle(), 5000, 'Profile query timeout');
+  if (p.error) throw p.error;
+  state.profile = p.data || { id: uid, full_name: state.session.user.email?.split('@')[0] || 'User', role: 'passenger', gender: 'male', travel_mode: 'solo', status: 'active', verification_status: 'unverified' };
+  const pp = await withTimeout(supabase.from('private_profiles').select('*').eq('user_id',uid).maybeSingle(), 5000, 'Private profile query timeout').catch(()=>({data:null,error:null}));
+  state.privateProfile = pp.data || { user_id: uid, phone: '' };
 }
-
 async function loadData(){
   if(!state.session) return;
   const uid = state.session.user.id;
