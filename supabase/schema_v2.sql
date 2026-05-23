@@ -403,3 +403,91 @@ end $$;
 
 -- Optional: run this manually sometimes, or schedule it later with pg_cron if available:
 -- select public.expire_old_rides();
+
+
+-- KYC document image storage bucket
+insert into storage.buckets (id, name, public)
+values ('kyc-documents', 'kyc-documents', true)
+on conflict (id) do update set public = true;
+
+drop policy if exists "kyc docs owner upload" on storage.objects;
+create policy "kyc docs owner upload"
+on storage.objects for insert
+with check (
+  bucket_id = 'kyc-documents'
+  and auth.uid()::text = (storage.foldername(name))[1]
+);
+
+drop policy if exists "kyc docs owner read" on storage.objects;
+create policy "kyc docs owner read"
+on storage.objects for select
+using (
+  bucket_id = 'kyc-documents'
+  and (
+    auth.uid()::text = (storage.foldername(name))[1]
+    or public.is_admin()
+  )
+);
+
+drop policy if exists "kyc docs public read" on storage.objects;
+create policy "kyc docs public read"
+on storage.objects for select
+using (bucket_id = 'kyc-documents');
+
+drop policy if exists "kyc docs owner update" on storage.objects;
+create policy "kyc docs owner update"
+on storage.objects for update
+using (
+  bucket_id = 'kyc-documents'
+  and auth.uid()::text = (storage.foldername(name))[1]
+);
+
+
+-- Driver rating after completed trips
+create table if not exists public.driver_ratings (
+  id uuid primary key default gen_random_uuid(),
+  history_id uuid not null references public.trip_history(id) on delete cascade,
+  ride_id uuid references public.rides(id) on delete set null,
+  booking_id uuid references public.bookings(id) on delete set null,
+  driver_id uuid not null references public.profiles(id) on delete cascade,
+  passenger_id uuid not null references public.profiles(id) on delete cascade,
+  rating int not null check (rating between 1 and 5),
+  review_text text,
+  created_at timestamptz not null default now(),
+  unique(history_id, passenger_id)
+);
+
+alter table public.driver_ratings enable row level security;
+
+drop policy if exists "ratings read" on public.driver_ratings;
+create policy "ratings read" on public.driver_ratings
+for select using (driver_id=auth.uid() or passenger_id=auth.uid() or public.is_admin());
+
+drop policy if exists "ratings passenger insert" on public.driver_ratings;
+create policy "ratings passenger insert" on public.driver_ratings
+for insert with check (passenger_id=auth.uid());
+
+create or replace function public.refresh_driver_rating(p_driver_id uuid)
+returns void language plpgsql security definer set search_path=public as $$
+begin
+  update public.profiles
+  set rating = coalesce((select round(avg(rating)::numeric,2) from public.driver_ratings where driver_id=p_driver_id),5.00)
+  where id=p_driver_id;
+end $$;
+
+create or replace function public.submit_driver_rating(p_history_id uuid, p_rating int, p_review_text text default null)
+returns uuid language plpgsql security definer set search_path=public as $$
+declare h record; v_id uuid;
+begin
+  select * into h from public.trip_history where id=p_history_id;
+  if not found then raise exception 'Trip history not found'; end if;
+  if h.passenger_id <> auth.uid() then raise exception 'Only passenger can rate this trip'; end if;
+  if h.status <> 'completed' then raise exception 'Only completed trips can be rated'; end if;
+  insert into public.driver_ratings(history_id,ride_id,booking_id,driver_id,passenger_id,rating,review_text)
+  values(p_history_id,h.ride_id,h.booking_id,h.driver_id,h.passenger_id,p_rating,p_review_text)
+  returning id into v_id;
+  perform public.refresh_driver_rating(h.driver_id);
+  return v_id;
+exception when unique_violation then
+  raise exception 'You already rated this trip';
+end $$;

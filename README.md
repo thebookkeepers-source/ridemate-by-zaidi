@@ -30,3 +30,14 @@ Production-oriented mobile-first carpool app package for Netlify + Supabase + Ca
 ## Android
 
 See `docs/ANDROID-BUILD-STEPS.md`.
+
+
+## V2 Admin/KYC fix included
+
+- Admin KYC tab now shows driver users first.
+- Admin can search users and open a driver to view submitted documents.
+- Driver document submission uses image upload instead of URL input.
+- KYC image storage bucket: `kyc-documents`.
+- Admin can approve driver when at least 3 documents are approved.
+- Passenger search typing is fixed; fields no longer reset while typing.
+- Service worker/cache cleanup added to reduce second-launch white screen.

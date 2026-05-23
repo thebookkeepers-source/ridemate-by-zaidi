@@ -35,7 +35,7 @@ const ROUTE_TEMPLATES = [
 const state = {
   session:null, profile:null, privateProfile:null,
   vehicles:[], rides:[], myRides:[], myBookings:[], requests:[], history:[], reports:[], users:[], documents:[], locations:[],
-  tab:'home', authMode:'login', authNotice:'', filters:{from:'',to:'',time:'any',rule:'safe'},
+  tab:'home', authMode:'login', authNotice:'', filters:{from:'',to:'',time:'any',rule:'safe'}, adminKycSearch:'', selectedKycUser:null,
   modal:null, loading:false
 };
 
@@ -90,7 +90,8 @@ async function loadData(){
   const historyQuery = supabase.from('trip_history_public').select('*').or(`passenger_id.eq.${uid},driver_id.eq.${uid}`).order('created_at',{ascending:false}).limit(100);
   const vehicleQuery = supabase.from('vehicles').select('*').eq('owner_id',uid).order('created_at',{ascending:false});
   const docsQuery = supabase.from('driver_documents').select('*').eq('user_id',uid);
-  const promises = [visibleRidesQuery,myRidesQuery,bookingsQuery,historyQuery,vehicleQuery,docsQuery];
+  const locationsQuery = supabase.from('trip_locations').select('*').order('created_at',{ascending:false}).limit(100);
+  const promises = [visibleRidesQuery,myRidesQuery,bookingsQuery,historyQuery,vehicleQuery,docsQuery,locationsQuery];
 
   if(isAdmin()){
     promises.push(supabase.from('profiles').select('*').order('created_at',{ascending:false}).limit(200));
@@ -106,10 +107,11 @@ async function loadData(){
   state.history = res[3].data || [];
   state.vehicles = res[4].data || [];
   state.documents = res[5].data || [];
+  state.locations = res[6].data || [];
   if(isAdmin()){
-    state.users = res[6].data || [];
-    state.reports = res[7].data || [];
-    state.documents = res[8].data || [];
+    state.users = res[7].data || [];
+    state.reports = res[8].data || [];
+    state.documents = res[9].data || [];
   }
 }
 
@@ -183,8 +185,9 @@ function passengerHome(){
   if(state.filters.to) rides = rides.filter(r => [r.to_city,r.dropoff_area,r.via_route].join(' ').toLowerCase().includes(state.filters.to.toLowerCase()));
   if(state.filters.rule==='safe') rides = rides.filter(r=>compatible(r).ok);
   const cards = rides.map(rideCard).join('') || `<div class="empty">No future rides found. Save your route or try a nearby pickup point.</div>`;
-  return `<div class="card hero"><div class="h1">Find your seat</div><p>Search any pickup and destination. Rides with expired departure times are hidden automatically.</p></div><div class="card"><div class="h2">Search route</div><div class="grid"><label>From / pickup<input id="fFrom" list="routeSuggestions" value="${esc(state.filters.from)}" placeholder="New City Phase 2"></label><label>To / dropoff<input id="fTo" list="routeSuggestions" value="${esc(state.filters.to)}" placeholder="Blue Area Islamabad"></label><div class="grid2"><label>Time<select id="fTime"><option value="any">Any</option><option>Morning</option><option>Evening</option></select></label><label>Filter<select id="fRule"><option value="safe" ${state.filters.rule==='safe'?'selected':''}>Safe match</option><option value="all" ${state.filters.rule==='all'?'selected':''}>All rides</option></select></label></div><button class="btn ghost" id="saveRouteBtn">Save custom route</button></div>${suggestions()}</div>${cards}`;
+  return `<div class="card hero"><div class="h1">Find your seat</div><p>Search any pickup and destination. Rides with expired departure times are hidden automatically.</p></div><form id="searchForm" class="card"><div class="h2">Search route</div><div class="grid"><label>From / pickup<input name="from" id="fFrom" list="routeSuggestions" value="${esc(state.filters.from)}" placeholder="New City Phase 2" autocomplete="off"></label><label>To / dropoff<input name="to" id="fTo" list="routeSuggestions" value="${esc(state.filters.to)}" placeholder="Blue Area Islamabad" autocomplete="off"></label><div class="grid2"><label>Time<select name="time" id="fTime"><option value="any" ${state.filters.time==='any'?'selected':''}>Any</option><option value="morning" ${state.filters.time==='morning'?'selected':''}>Morning</option><option value="evening" ${state.filters.time==='evening'?'selected':''}>Evening</option></select></label><label>Filter<select name="rule" id="fRule"><option value="safe" ${state.filters.rule==='safe'?'selected':''}>Safe match</option><option value="all" ${state.filters.rule==='all'?'selected':''}>All rides</option></select></label></div><button class="btn green">Search rides</button></div>${suggestions()}</form>${cards}<div class="card"><button type="button" class="btn ghost" id="saveRouteBtn">Save this route for later alerts</button></div>`;
 }
+
 function rideCard(r){
   const c=compatible(r), existing=state.myBookings.find(b=>b.ride_id===r.id && ['pending','accepted','active'].includes(b.status));
   return `<div class="card"><div class="meta"><span class="pill green">Verified driver</span><span class="pill">${r.seats_left} seats</span><span class="pill blue">${fmt(r.departure_at)}</span></div><div class="row" style="margin-top:12px"><div><div class="route">${esc(r.from_city)} → ${esc(r.to_city)}</div><div class="small">${esc(r.pickup_area)} to ${esc(r.dropoff_area)}</div></div><div class="fare">${money(r.price_per_seat)}</div></div><div class="small muted">${esc(r.via_route || '')} ${routeSummary(r)?' · '+esc(routeSummary(r)):''}</div><div class="line"></div><div class="grid2"><button class="btn ghost" data-details="${r.id}">Details</button><button class="btn green" data-book="${r.id}" ${!c.ok||existing?'disabled':''}>${existing?'Requested':'Request'}</button></div></div>`;
@@ -214,12 +217,15 @@ function requestCard(b){
 
 function liveView(){
   const active = state.myBookings.find(b=>['accepted','active'].includes(b.status)) || state.requests.find(b=>['accepted','active'].includes(b.status));
-  if(!active) return `<div class="card"><div class="h1">Live trip</div><p class="muted">Live location appears after a booking is accepted.</p></div>`;
-  return `<div class="card hero"><div class="h1">Live trip</div><p>${esc(active.from_city)} → ${esc(active.to_city)}</p></div><div class="card"><div class="map"><div class="pin a"></div><div class="pin b"></div><div class="pulse"></div></div><div class="line"></div><div class="grid"><button class="btn green" id="shareLocationBtn">Share my live location</button><button class="btn ghost" id="familyShareBtn">Copy family tracking message</button><button class="btn danger" id="sosBtn">Emergency SOS</button></div></div>`;
+  if(!active) return `<div class="card"><div class="h1">Live trip</div><p class="muted">Live location appears after a booking is accepted and the driver starts the trip.</p></div>`;
+  const isPassenger = active.passenger_id === state.session.user.id;
+  const latestDriverLoc = state.locations.find(l => l.booking_id === active.id && l.user_id === active.driver_id);
+  return `<div class="card hero"><div class="h1">Live trip</div><p>${esc(active.from_city)} → ${esc(active.to_city)}</p></div><div class="card"><div class="map"><div class="pin a"></div><div class="pin b"></div><div class="pulse"></div></div><div class="line"></div>${isPassenger ? `<div class="alert"><b>Driver live location</b><br>${latestDriverLoc ? `Last shared: ${fmt(latestDriverLoc.created_at)}<br>Lat: ${latestDriverLoc.lat}, Lng: ${latestDriverLoc.lng}` : 'Waiting for driver to share live location after trip starts.'}</div>` : `<div class="alert"><b>Driver mode</b><br>Tap below to share your current location with all accepted passengers for this trip.</div>`}<div class="grid" style="margin-top:12px"><button class="btn green" id="shareLocationBtn">${isPassenger ? 'Share my location too' : 'Share driver live location'}</button><button class="btn ghost" id="familyShareBtn">Copy family tracking message</button><button class="btn danger" id="sosBtn">Emergency SOS</button></div></div>`;
 }
+
 function historyView(){
-  const rows = state.history.map(h=>`<div class="card"><div class="meta"><span class="pill ${h.status==='completed'?'green':h.status==='expired'?'warn':'bad'}">${esc(h.status)}</span><span class="pill">${fmt(h.created_at)}</span></div><div class="route" style="margin-top:10px">${esc(h.from_city)} → ${esc(h.to_city)}</div><div class="small">${esc(h.other_party || '')} · ${money(h.price_per_seat || 0)}</div><div class="line"></div><div class="grid2"><button class="btn ghost" data-history-details="${h.id}">Details</button><button class="btn ghost" data-rate="${h.id}">Rate</button></div></div>`).join('');
-  return `<div class="card"><div class="h1">Trip history</div><p class="muted">Completed, cancelled, rejected and expired rides stay here.</p></div>${rows || '<div class="empty">No history yet.</div>'}`;
+  const rows = state.history.map(h=>`<div class="card"><div class="meta"><span class="pill ${h.status==='completed'?'green':h.status==='expired'?'warn':'bad'}">${esc(h.status)}</span><span class="pill">${fmt(h.created_at)}</span></div><div class="route" style="margin-top:10px">${esc(h.from_city)} → ${esc(h.to_city)}</div><div class="small">${esc(h.other_party || '')} · ${money(h.price_per_seat || 0)}</div><div class="line"></div><div class="grid2"><button class="btn ghost" data-history-details="${h.id}">Details</button><button class="btn ghost" data-rate="${h.id}" ${h.status!=='completed'?'disabled':''}>Rate driver</button></div></div>`).join('');
+  return `<div class="card"><div class="h1">Trip history</div><p class="muted">Completed, cancelled, rejected and expired rides stay here. Passengers can rate drivers after completed trips.</p></div>${rows || '<div class="empty">No history yet.</div>'}`;
 }
 
 function profileView(){
@@ -227,7 +233,7 @@ function profileView(){
   const isDriver = role()==='driver';
   const vehicles = state.vehicles.map(v=>`<div class="row"><span>${esc(v.car_model)} · ${esc(v.plate_number)}</span><span class="pill ${v.is_verified?'green':'warn'}">${v.is_verified?'verified':'pending'}</span></div>`).join('') || '<p class="small muted">No vehicle added.</p>';
   const docs = ['cnic_front','cnic_back','license','vehicle_registration','selfie'].map(t=>`<div class="row"><span>${labelDoc(t)}</span><span class="pill ${state.documents.find(d=>d.doc_type===t && d.status==='approved')?'green':state.documents.find(d=>d.doc_type===t)?'warn':'bad'}">${state.documents.find(d=>d.doc_type===t)?.status || 'missing'}</span></div>`).join('');
-  return `<div class="card"><div class="h1">Profile</div><form id="profileForm" class="grid"><label>Full name<input name="full_name" value="${esc(p.full_name)}" required></label><div class="grid2"><label>Gender<select name="gender"><option value="male" ${p.gender==='male'?'selected':''}>Male</option><option value="female" ${p.gender==='female'?'selected':''}>Female</option></select></label><label>Travel mode<select name="travel_mode"><option value="solo" ${p.travel_mode==='solo'?'selected':''}>Solo</option><option value="family" ${p.travel_mode==='family'?'selected':''}>Family</option></select></label></div><label>Phone<input name="phone" value="${esc(pp.phone||'')}" required></label><label>Emergency contact<input name="emergency_contact" value="${esc(pp.emergency_contact||'')}" placeholder="Family phone"></label><button class="btn green">Save profile</button></form></div>${isDriver?`<div class="card"><div class="h2">Driver verification</div><div class="meta"><span class="pill ${p.verification_status==='verified'?'green':'warn'}">${esc(p.verification_status||'pending')}</span></div><div class="line"></div>${docs}<div class="line"></div><form id="docForm" class="grid"><label>Document type<select name="doc_type"><option value="cnic_front">CNIC front</option><option value="cnic_back">CNIC back</option><option value="license">Driving license</option><option value="vehicle_registration">Vehicle registration</option><option value="selfie">Selfie verification</option></select></label><label>Document reference / image URL<input name="file_url" placeholder="Upload link or reference" required></label><button class="btn">Submit document</button></form></div><div class="card"><div class="h2">Vehicles</div>${vehicles}<div class="line"></div><form id="vehicleForm" class="grid"><div class="grid2"><label>Car model<input name="car_model" required placeholder="Honda City"></label><label>Plate number<input name="plate_number" required placeholder="ABC-123"></label></div><label>Color<input name="color" placeholder="White"></label><button class="btn">Add vehicle</button></form></div>`:''}`;
+  return `<div class="card"><div class="h1">Profile</div><form id="profileForm" class="grid"><label>Full name<input name="full_name" value="${esc(p.full_name)}" required></label><div class="grid2"><label>Gender<select name="gender"><option value="male" ${p.gender==='male'?'selected':''}>Male</option><option value="female" ${p.gender==='female'?'selected':''}>Female</option></select></label><label>Travel mode<select name="travel_mode"><option value="solo" ${p.travel_mode==='solo'?'selected':''}>Solo</option><option value="family" ${p.travel_mode==='family'?'selected':''}>Family</option></select></label></div><label>Phone<input name="phone" value="${esc(pp.phone||'')}" required></label><label>Emergency contact<input name="emergency_contact" value="${esc(pp.emergency_contact||'')}" placeholder="Family phone"></label><button class="btn green">Save profile</button></form></div>${isDriver?`<div class="card"><div class="h2">Driver verification</div><div class="meta"><span class="pill ${p.verification_status==='verified'?'green':'warn'}">${esc(p.verification_status||'pending')}</span></div><div class="line"></div>${docs}<div class="line"></div><form id="docForm" class="grid"><label>Document type<select name="doc_type"><option value="cnic_front">CNIC front</option><option value="cnic_back">CNIC back</option><option value="license">Driving license</option><option value="vehicle_registration">Vehicle registration</option><option value="selfie">Selfie verification</option></select></label><label>Upload image<input name="file" type="file" accept="image/*" required></label><p class="small muted">Upload a clear image. Admin will review it before driver approval.</p><button class="btn">Upload document</button></form></div><div class="card"><div class="h2">Vehicles</div>${vehicles}<div class="line"></div><form id="vehicleForm" class="grid"><div class="grid2"><label>Car model<input name="car_model" required placeholder="Honda City"></label><label>Plate number<input name="plate_number" required placeholder="ABC-123"></label></div><label>Color<input name="color" placeholder="White"></label><button class="btn">Add vehicle</button></form></div>`:''}`;
 }
 function labelDoc(t){ return ({cnic_front:'CNIC front',cnic_back:'CNIC back',license:'Driving license',vehicle_registration:'Vehicle registration',selfie:'Selfie verification'}[t]||t); }
 
@@ -239,17 +245,33 @@ function adminView(){
   return `<div class="card hero"><div class="h1">Admin</div><p>Manage users, driver KYC, route quality, rides and safety reports.</p></div><div class="kpiGrid"><div class="kpi"><b>${state.users.length}</b><span class="small">Users</span></div><div class="kpi"><b>${state.rides.length}</b><span class="small">Open rides</span></div><div class="kpi"><b>${state.documents.filter(d=>d.status==='pending').length}</b><span class="small">Pending KYC</span></div><div class="kpi"><b>${state.reports.length}</b><span class="small">Reports</span></div></div><div class="card"><div class="h2">Users</div><table class="table"><tr><th>User</th><th>Role</th><th>Status</th></tr>${state.users.map(u=>`<tr><td>${esc(u.full_name)}<br><span class="small">${esc(u.id)}</span></td><td>${esc(u.role)}</td><td>${esc(u.status)}<br><button class="btn ghost" data-user-status="${u.id}:${u.status==='active'?'blocked':'active'}">${u.status==='active'?'Block':'Activate'}</button></td></tr>`).join('')}</table></div>`;
 }
 function adminKyc(){
-  return `<div class="card"><div class="h1">Driver KYC</div><p class="muted">Approve documents and set driver verification status.</p></div>${state.documents.map(d=>`<div class="card"><div class="row"><div><div class="route">${esc(d.full_name)}</div><div class="small">${labelDoc(d.doc_type)} · ${esc(d.file_url)}</div></div><span class="pill ${d.status==='approved'?'green':d.status==='rejected'?'bad':'warn'}">${esc(d.status)}</span></div><div class="line"></div><div class="grid2"><button class="btn green" data-doc-approve="${d.id}">Approve</button><button class="btn ghost" data-doc-reject="${d.id}">Reject</button></div><button class="btn green" style="margin-top:10px" data-driver-verify="${d.user_id}">Mark driver verified</button></div>`).join('') || '<div class="empty">No KYC documents.</div>'}`;
+  const drivers = state.users.filter(u => u.role === 'driver');
+  const q = (state.adminKycSearch || '').toLowerCase();
+  const filtered = drivers.filter(u => [u.full_name,u.id,u.status,u.verification_status].join(' ').toLowerCase().includes(q));
+  const selected = state.selectedKycUser ? state.users.find(u=>u.id===state.selectedKycUser) : null;
+  if (selected) {
+    const docs = state.documents.filter(d=>d.user_id===selected.id);
+    const approvedCount = docs.filter(d=>d.status==='approved').length;
+    const required = ['cnic_front','cnic_back','license','vehicle_registration','selfie'];
+    return `<div class="card"><button class="btn ghost" id="backKycUsers">Back to drivers</button><div class="h1" style="margin-top:12px">${esc(selected.full_name)}</div><p class="muted">Driver verification detail. Admin can approve a driver when at least 3 required documents are approved.</p><div class="meta"><span class="pill ${selected.verification_status==='verified'?'green':'warn'}">${esc(selected.verification_status||'unverified')}</span><span class="pill blue">${approvedCount}/${required.length} approved</span></div></div>${required.map(t=>{
+      const d = docs.find(x=>x.doc_type===t);
+      return `<div class="card"><div class="row"><div><div class="route">${labelDoc(t)}</div><div class="small">${d ? esc(d.file_url) : 'Not submitted yet'}</div></div><span class="pill ${d?.status==='approved'?'green':d?.status==='rejected'?'bad':d?'warn':'bad'}">${d?.status || 'missing'}</span></div>${d?.file_url ? `<div class="docPreview"><img src="${esc(d.file_url)}" alt="${esc(labelDoc(t))}" onerror="this.style.display='none'"></div>` : ''}${d?`<div class="line"></div><div class="grid2"><button class="btn green" data-doc-approve="${d.id}">Approve</button><button class="btn ghost" data-doc-reject="${d.id}">Reject</button></div>`:''}</div>`;
+    }).join('')}<div class="card"><div class="h2">Driver approval</div><p class="small muted">Recommended: approve only after CNIC, license, vehicle registration and selfie are valid. System allows approval when at least 3 documents are approved.</p><button class="btn green" data-driver-verify="${selected.id}" ${approvedCount < 3 ? 'disabled' : ''}>Approve driver</button><button class="btn ghost" style="margin-top:10px" data-driver-unverify="${selected.id}">Remove verification</button></div>`;
+  }
+  return `<div class="card"><div class="h1">Driver KYC</div><p class="muted">Search driver users and open their submitted documents.</p><label>Search users<input id="kycSearch" value="${esc(state.adminKycSearch)}" placeholder="Search by name, status, ID"></label></div>${filtered.map(u=>{
+    const docs = state.documents.filter(d=>d.user_id===u.id);
+    const approvedCount = docs.filter(d=>d.status==='approved').length;
+    return `<div class="card kycUserCard" data-open-kyc-user="${u.id}"><div class="row"><div><div class="route">${esc(u.full_name)}</div><div class="small">${esc(u.id)}<br>${approvedCount} documents approved</div></div><span class="pill ${u.verification_status==='verified'?'green':'warn'}">${esc(u.verification_status||'unverified')}</span></div></div>`;
+  }).join('') || '<div class="empty">No drivers found.</div>'}`;
 }
+
 function adminRides(){ return `<div class="card"><div class="h1">Rides</div><table class="table"><tr><th>Route</th><th>Driver</th><th>Status</th></tr>${state.rides.concat(state.myRides).map(r=>`<tr><td>${esc(r.from_city)} → ${esc(r.to_city)}<br><span class="small">${fmt(r.departure_at)}</span></td><td>${esc(r.driver_name)}</td><td>${esc(r.status)}<br><button class="btn ghost" data-close="${r.id}">Close</button></td></tr>`).join('')}</table></div>`; }
 function adminReports(){ return `<div class="card"><div class="h1">Reports</div>${state.reports.map(r=>`<div class="card" style="box-shadow:none"><div class="row"><b>${esc(r.report_type)}</b><span class="pill warn">${esc(r.status)}</span></div><p class="small">${esc(r.details)}</p><button class="btn green" data-report-resolve="${r.id}">Resolve</button></div>`).join('') || '<div class="empty">No reports.</div>'}</div>`; }
 
 function bindEvents(){
-  const fFrom=$('#fFrom'), fTo=$('#fTo'), fRule=$('#fRule');
-  if(fFrom) fFrom.oninput=e=>{state.filters.from=e.target.value; render();};
-  if(fTo) fTo.oninput=e=>{state.filters.to=e.target.value; render();};
-  if(fRule) fRule.onchange=e=>{state.filters.rule=e.target.value; render();};
-  const saveRouteBtn=$('#saveRouteBtn'); if(saveRouteBtn) saveRouteBtn.onclick=saveRoute;
+  const searchForm=$('#searchForm');
+  if(searchForm) searchForm.onsubmit=(e)=>{e.preventDefault(); const f=Object.fromEntries(new FormData(e.target)); state.filters.from=f.from||''; state.filters.to=f.to||''; state.filters.time=f.time||'any'; state.filters.rule=f.rule||'safe'; render();};
+  const saveRouteBtn=$('#saveRouteBtn'); if(saveRouteBtn) saveRouteBtn.onclick=()=>{ const f=$('#fFrom')?.value || state.filters.from; const t=$('#fTo')?.value || state.filters.to; state.filters.from=f; state.filters.to=t; saveRoute(); };
   const templateSelect=$('#templateSelect'); if(templateSelect) templateSelect.onchange=applyTemplate;
   const rideForm=$('#rideForm'); if(rideForm) rideForm.onsubmit=createRide;
   const profileForm=$('#profileForm'); if(profileForm) profileForm.onsubmit=saveProfile;
@@ -267,10 +289,16 @@ function bindEvents(){
   document.querySelectorAll('[data-doc-approve]').forEach(b=>b.onclick=()=>adminDoc(b.dataset.docApprove,'approved'));
   document.querySelectorAll('[data-doc-reject]').forEach(b=>b.onclick=()=>adminDoc(b.dataset.docReject,'rejected'));
   document.querySelectorAll('[data-driver-verify]').forEach(b=>b.onclick=()=>adminVerify(b.dataset.driverVerify));
+  document.querySelectorAll('[data-driver-unverify]').forEach(b=>b.onclick=()=>adminUnverify(b.dataset.driverUnverify));
+  document.querySelectorAll('[data-open-kyc-user]').forEach(b=>b.onclick=()=>{state.selectedKycUser=b.dataset.openKycUser; render();});
+  const backKycUsers=$('#backKycUsers'); if(backKycUsers) backKycUsers.onclick=()=>{state.selectedKycUser=null; render();};
+  const kycSearch=$('#kycSearch'); if(kycSearch) kycSearch.oninput=(e)=>{state.adminKycSearch=e.target.value; render();};
   document.querySelectorAll('[data-user-status]').forEach(b=>b.onclick=()=>{const [id,status]=b.dataset.userStatus.split(':'); rpc('admin_set_user_status',{p_user_id:id,p_status:status});});
   document.querySelectorAll('[data-report-resolve]').forEach(b=>b.onclick=()=>supabase.from('reports').update({status:'resolved'}).eq('id',b.dataset.reportResolve).then(()=>loadData().then(render)));
+  document.querySelectorAll('[data-rate]').forEach(b=>b.onclick=()=>openRatingModal(b.dataset.rate));
   const bookRideForm=$('#bookRideForm'); if(bookRideForm) bookRideForm.onsubmit=submitBooking;
   const close=$('#modalClose'); if(close) close.onclick=()=>{state.modal=null; render();};
+  const ratingForm=$('#ratingForm'); if(ratingForm) ratingForm.onsubmit=submitRating;
   const shareLoc=$('#shareLocationBtn'); if(shareLoc) shareLoc.onclick=shareLocation;
   const family=$('#familyShareBtn'); if(family) family.onclick=()=>navigator.clipboard?.writeText('My RideMate trip is active. Please check my live location in RideMate.').then(()=>toast('Family message copied'));
   const sos=$('#sosBtn'); if(sos) sos.onclick=()=>location.href='tel:15';
@@ -290,20 +318,47 @@ function openBookingModal(id){ const r=state.rides.find(x=>x.id===id)||state.myR
 async function submitBooking(e){ e.preventDefault(); const f=Object.fromEntries(new FormData(e.target)); const note=[f.requested_pickup?`Requested pickup: ${f.requested_pickup}`:'', f.note||''].filter(Boolean).join(' | ') || null; const {error}=await supabase.rpc('create_booking_request_v2',{p_ride_id:f.ride_id,p_seats_requested:1,p_note:note}); if(error) toast(error.message); else {state.modal=null; toast('Request sent'); await loadData(); render();} }
 async function saveProfile(e){ e.preventDefault(); const f=Object.fromEntries(new FormData(e.target)); const [a,b]=await Promise.all([supabase.from('profiles').update({full_name:f.full_name,gender:f.gender,travel_mode:f.travel_mode}).eq('id',state.session.user.id),supabase.from('private_profiles').update({phone:f.phone,emergency_contact:f.emergency_contact||null}).eq('user_id',state.session.user.id)]); if(a.error||b.error) toast(a.error?.message||b.error?.message); else {toast('Profile saved'); await loadMe(); render();} }
 async function addVehicle(e){ e.preventDefault(); const f=Object.fromEntries(new FormData(e.target)); const {error}=await supabase.from('vehicles').insert({owner_id:state.session.user.id,car_model:f.car_model,plate_number:f.plate_number,color:f.color||null}); if(error) toast(error.message); else {toast('Vehicle added'); await loadData(); render();} }
-async function submitDoc(e){ e.preventDefault(); const f=Object.fromEntries(new FormData(e.target)); const {error}=await supabase.from('driver_documents').insert({user_id:state.session.user.id,doc_type:f.doc_type,file_url:f.file_url,status:'pending'}); if(error) toast(error.message); else {toast('Document submitted'); await loadData(); render();} }
+async function submitDoc(e){
+  e.preventDefault();
+  const form = e.target;
+  const f = Object.fromEntries(new FormData(form));
+  const file = form.querySelector('input[name="file"]')?.files?.[0];
+  if(!file) return toast('Please select an image');
+  if(!file.type.startsWith('image/')) return toast('Only image files are allowed');
+  if(file.size > 5 * 1024 * 1024) return toast('Image must be less than 5MB');
+  const ext = file.name.split('.').pop() || 'jpg';
+  const path = `${state.session.user.id}/${f.doc_type}-${Date.now()}.${ext}`;
+  const up = await supabase.storage.from('kyc-documents').upload(path, file, { upsert: true, contentType: file.type });
+  if(up.error) return toast(up.error.message);
+  const { data } = supabase.storage.from('kyc-documents').getPublicUrl(path);
+  const {error}=await supabase.from('driver_documents').insert({user_id:state.session.user.id,doc_type:f.doc_type,file_url:data.publicUrl,status:'pending'});
+  if(error) toast(error.message); else {toast('Document uploaded'); await loadData(); render();}
+}
+
 async function getContact(id){ const {data,error}=await supabase.rpc('get_booking_contact',{p_booking_id:id}); if(error) toast(error.message); else alert(`Contact: ${data.full_name}\nPhone: ${data.phone}\nEmergency: ${data.emergency_contact || 'Not added'}`); }
 async function adminDoc(id,status){ const {error}=await supabase.from('driver_documents').update({status}).eq('id',id); if(error) toast(error.message); else {toast('Document updated'); await loadData(); render();} }
 async function adminVerify(uid){ await supabase.rpc('admin_set_driver_verified',{p_user_id:uid,p_verified:true}); toast('Driver verified'); await loadData(); render(); }
+async function adminUnverify(uid){ await supabase.rpc('admin_set_driver_verified',{p_user_id:uid,p_verified:false}); toast('Driver verification removed'); await loadData(); render(); }
 async function shareLocation(){
   if(!navigator.geolocation) return toast('Location not supported');
   navigator.geolocation.getCurrentPosition(async pos=>{
     const active = state.myBookings.find(b=>['accepted','active'].includes(b.status)) || state.requests.find(b=>['accepted','active'].includes(b.status));
     if(!active) return toast('No active trip');
-    const {error}=await supabase.from('trip_locations').insert({booking_id:active.id,user_id:state.session.user.id,lat:pos.coords.latitude,lng:pos.coords.longitude,accuracy:pos.coords.accuracy});
-    if(error) toast(error.message); else toast('Live location shared');
+    const lat = pos.coords.latitude, lng = pos.coords.longitude, accuracy = pos.coords.accuracy;
+    let rows = [];
+    if(active.driver_id === state.session.user.id){
+      const sameRideBookings = state.requests.filter(b => b.ride_id === active.ride_id && ['accepted','active'].includes(b.status));
+      rows = sameRideBookings.map(b => ({booking_id:b.id,user_id:state.session.user.id,lat,lng,accuracy}));
+      if(!rows.length) rows = [{booking_id:active.id,user_id:state.session.user.id,lat,lng,accuracy}];
+    } else {
+      rows = [{booking_id:active.id,user_id:state.session.user.id,lat,lng,accuracy}];
+    }
+    const {error}=await supabase.from('trip_locations').insert(rows);
+    if(error) toast(error.message); else {toast('Live location shared'); await loadData(); render();}
   },()=>toast('Location permission denied'),{enableHighAccuracy:true,timeout:10000});
 }
+
 function showRideDetails(id){ const r=state.rides.find(x=>x.id===id)||state.myRides.find(x=>x.id===id); state.modal=`<div class="modalBack"><div class="modal"><button class="btn ghost" id="modalClose">Close</button><div class="h1">${esc(r.from_city)} → ${esc(r.to_city)}</div><p class="muted">${fmt(r.departure_at)}</p><div class="card" style="box-shadow:none"><div class="row"><span>Pickup</span><b>${esc(r.pickup_area)}</b></div><div class="row"><span>Dropoff</span><b>${esc(r.dropoff_area)}</b></div><div class="row"><span>Via</span><b>${esc(r.via_route||'')}</b></div><div class="row"><span>Seats</span><b>${r.seats_left}/${r.total_seats}</b></div><div class="row"><span>Fare</span><b>${money(r.price_per_seat)}</b></div><div class="row"><span>Driver</span><b>${esc(r.driver_name)} · ${esc(r.driver_gender)}</b></div></div>${role()==='passenger'?`<button class="btn green" data-book="${r.id}">Request seat</button>`:''}</div></div>`; render(); }
 
-if('serviceWorker' in navigator) window.addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}));
+if('serviceWorker' in navigator) window.addEventListener('load',async()=>{ try { const regs=await navigator.serviceWorker.getRegistrations(); for (const r of regs) await r.unregister(); if(window.caches){ const keys=await caches.keys(); await Promise.all(keys.map(k=>caches.delete(k))); } await navigator.serviceWorker.register('/sw.js'); } catch(e){} });
 init();

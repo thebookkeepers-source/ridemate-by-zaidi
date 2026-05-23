@@ -1,4 +1,4 @@
-const CACHE = 'ridemate-v2-final-1';
+const CACHE = 'ridemate-v2-admin-kyc-fix-1';
 const ASSETS = ['/', '/manifest.webmanifest', '/icons/icon.svg'];
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(ASSETS)).then(() => self.skipWaiting()));
@@ -8,9 +8,5 @@ self.addEventListener('activate', (event) => {
 });
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
-  event.respondWith(fetch(event.request).then((res) => {
-    const copy = res.clone();
-    caches.open(CACHE).then(cache => cache.put(event.request, copy)).catch(()=>{});
-    return res;
-  }).catch(() => caches.match(event.request).then(r => r || caches.match('/'))));
+  event.respondWith(fetch(event.request).catch(() => caches.match(event.request).then(r => r || caches.match('/'))));
 });
