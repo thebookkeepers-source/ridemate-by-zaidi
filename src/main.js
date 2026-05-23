@@ -43,6 +43,11 @@ const $ = (s) => document.querySelector(s);
 const esc = (v='') => String(v ?? '').replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
 const money = (n) => `Rs. ${Number(n || 0).toLocaleString('en-PK')}`;
 const fmt = (d) => d ? new Date(d).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '';
+
+function showBoot(message='Loading RideMate...'){
+  app.innerHTML = `<div class="auth"><div class="authShell"><div class="authHero"><div class="bigIcon">${logo()}</div><div class="h1">RideMate</div><p>${esc(message)}</p></div><div class="card"><div class="h2">Starting app</div><p class="small muted">Please wait. If this screen stays for more than 10 seconds, refresh once.</p><button class="btn green" onclick="location.reload()">Reload</button></div></div></div>`;
+}
+
 const role = () => state.profile?.role || 'passenger';
 const isAdmin = () => role()==='admin';
 
@@ -55,16 +60,32 @@ window.addEventListener('error', (event) => {
 });
 
 async function init(){
-  const { data } = await supabase.auth.getSession();
-  state.session = data.session;
-  if (state.session) { await loadMe(); await loadData(); subscribeRealtime(); }
-  render();
+  showBoot();
+  try {
+    const { data, error } = await supabase.auth.getSession();
+    if (error) throw error;
+    state.session = data.session;
+    if (state.session) {
+      await loadMe();
+      await loadData();
+      subscribeRealtime();
+    }
+    render();
+  } catch (err) {
+    console.error('RideMate boot error:', err);
+    app.innerHTML = `<div class="auth"><div class="authShell"><div class="card"><div class="h1">App setup issue</div><p class="muted">${esc(err.message || err)}</p><p class="small muted">Check Netlify environment variables and Supabase URL/key.</p><button class="btn green" onclick="location.reload()">Reload</button></div></div></div>`;
+  }
 }
 supabase.auth.onAuthStateChange(async (_event, session) => {
-  state.session = session;
-  if (session) { await loadMe(); await loadData(); subscribeRealtime(); }
-  else resetState();
-  render();
+  try {
+    state.session = session;
+    if (session) { await loadMe(); await loadData(); subscribeRealtime(); }
+    else resetState();
+    render();
+  } catch (err) {
+    console.error('Auth state error:', err);
+    toast(err.message || 'Auth loading error');
+  }
 });
 function resetState(){
   Object.assign(state,{profile:null,privateProfile:null,vehicles:[],rides:[],myRides:[],myBookings:[],requests:[],history:[],reports:[],users:[],documents:[],locations:[],tab:'home',modal:null});
@@ -84,34 +105,26 @@ async function loadData(){
   if(!state.session) return;
   const uid = state.session.user.id;
   const nowIso = new Date().toISOString();
-  const visibleRidesQuery = supabase.from('rides_public').select('*').eq('status','open').gt('departure_at', nowIso).order('departure_at',{ascending:true}).limit(100);
-  const myRidesQuery = supabase.from('rides_public').select('*').eq('driver_id',uid).order('departure_at',{ascending:false}).limit(100);
-  const bookingsQuery = supabase.from('bookings_public').select('*').or(`passenger_id.eq.${uid},driver_id.eq.${uid}`).order('created_at',{ascending:false}).limit(150);
-  const historyQuery = supabase.from('trip_history_public').select('*').or(`passenger_id.eq.${uid},driver_id.eq.${uid}`).order('created_at',{ascending:false}).limit(100);
-  const vehicleQuery = supabase.from('vehicles').select('*').eq('owner_id',uid).order('created_at',{ascending:false});
-  const docsQuery = supabase.from('driver_documents').select('*').eq('user_id',uid);
-  const locationsQuery = supabase.from('trip_locations').select('*').order('created_at',{ascending:false}).limit(100);
-  const promises = [visibleRidesQuery,myRidesQuery,bookingsQuery,historyQuery,vehicleQuery,docsQuery,locationsQuery];
-
-  if(isAdmin()){
-    promises.push(supabase.from('profiles').select('*').order('created_at',{ascending:false}).limit(200));
-    promises.push(supabase.from('reports_public').select('*').order('created_at',{ascending:false}).limit(100));
-    promises.push(supabase.from('driver_documents_public').select('*').order('created_at',{ascending:false}).limit(200));
-  }
-  const res = await Promise.all(promises);
-  state.rides = res[0].data || [];
-  state.myRides = res[1].data || [];
-  const allBookings = res[2].data || [];
+  const run = async (query, fallback=[]) => {
+    try {
+      const {data, error} = await query;
+      if (error) { console.warn('Query warning:', error.message); return fallback; }
+      return data || fallback;
+    } catch(e) { console.warn('Query failed:', e.message); return fallback; }
+  };
+  state.rides = await run(supabase.from('rides_public').select('*').eq('status','open').gt('departure_at', nowIso).order('departure_at',{ascending:true}).limit(100));
+  state.myRides = await run(supabase.from('rides_public').select('*').eq('driver_id',uid).order('departure_at',{ascending:false}).limit(100));
+  const allBookings = await run(supabase.from('bookings_public').select('*').or(`passenger_id.eq.${uid},driver_id.eq.${uid}`).order('created_at',{ascending:false}).limit(150));
   state.myBookings = allBookings.filter(b=>b.passenger_id===uid);
   state.requests = allBookings.filter(b=>b.driver_id===uid);
-  state.history = res[3].data || [];
-  state.vehicles = res[4].data || [];
-  state.documents = res[5].data || [];
-  state.locations = res[6].data || [];
+  state.history = await run(supabase.from('trip_history_public').select('*').or(`passenger_id.eq.${uid},driver_id.eq.${uid}`).order('created_at',{ascending:false}).limit(100));
+  state.vehicles = await run(supabase.from('vehicles').select('*').eq('owner_id',uid).order('created_at',{ascending:false}));
+  state.documents = await run(supabase.from('driver_documents').select('*').eq('user_id',uid));
+  state.locations = await run(supabase.from('trip_locations').select('*').order('created_at',{ascending:false}).limit(100));
   if(isAdmin()){
-    state.users = res[7].data || [];
-    state.reports = res[8].data || [];
-    state.documents = res[9].data || [];
+    state.users = await run(supabase.from('profiles').select('*').order('created_at',{ascending:false}).limit(200));
+    state.reports = await run(supabase.from('reports_public').select('*').order('created_at',{ascending:false}).limit(100));
+    state.documents = await run(supabase.from('driver_documents_public').select('*').order('created_at',{ascending:false}).limit(200));
   }
 }
 
@@ -360,5 +373,12 @@ async function shareLocation(){
 
 function showRideDetails(id){ const r=state.rides.find(x=>x.id===id)||state.myRides.find(x=>x.id===id); state.modal=`<div class="modalBack"><div class="modal"><button class="btn ghost" id="modalClose">Close</button><div class="h1">${esc(r.from_city)} → ${esc(r.to_city)}</div><p class="muted">${fmt(r.departure_at)}</p><div class="card" style="box-shadow:none"><div class="row"><span>Pickup</span><b>${esc(r.pickup_area)}</b></div><div class="row"><span>Dropoff</span><b>${esc(r.dropoff_area)}</b></div><div class="row"><span>Via</span><b>${esc(r.via_route||'')}</b></div><div class="row"><span>Seats</span><b>${r.seats_left}/${r.total_seats}</b></div><div class="row"><span>Fare</span><b>${money(r.price_per_seat)}</b></div><div class="row"><span>Driver</span><b>${esc(r.driver_name)} · ${esc(r.driver_gender)}</b></div></div>${role()==='passenger'?`<button class="btn green" data-book="${r.id}">Request seat</button>`:''}</div></div>`; render(); }
 
-if('serviceWorker' in navigator) window.addEventListener('load',async()=>{ try { const regs=await navigator.serviceWorker.getRegistrations(); for (const r of regs) await r.unregister(); if(window.caches){ const keys=await caches.keys(); await Promise.all(keys.map(k=>caches.delete(k))); } await navigator.serviceWorker.register('/sw.js'); } catch(e){} });
+if('serviceWorker' in navigator) window.addEventListener('load',async()=>{
+  try {
+    const regs = await navigator.serviceWorker.getRegistrations();
+    for (const r of regs) await r.unregister();
+    if(window.caches){ const keys=await caches.keys(); await Promise.all(keys.map(k=>caches.delete(k))); }
+    console.log('Old RideMate service workers cleared');
+  } catch(e) { console.warn(e); }
+});
 init();
